@@ -120,3 +120,13 @@ belongs to `smart_ptr` — and staging one of those would let the original win
 over the generated header that replaces it. The exception is `header.hpp` and
 `footer.hpp`, the ABI prefix/suffix fragments: neither is a translation unit, so
 the conversion leaves both as textual includes and they still have to resolve.
+
+## License
+
+AGPL-3.0, as [modulizer](https://github.com/j4niwzis/modulizer) is — the
+pipeline and the tool it drives are one thing, and it would be confusing for
+them to be licensed differently.
+
+This covers the scripts only. The libraries they convert stay under the Boost
+Software License 1.0: a published fork is upstream's own repository with one
+commit on top, so Boost's per-file copyright notices ride along untouched.
