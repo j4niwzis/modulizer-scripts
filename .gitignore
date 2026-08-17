@@ -1,0 +1,4 @@
+# Nothing the pipeline produces belongs in the repository.
+*.log
+.build-*/
+work/

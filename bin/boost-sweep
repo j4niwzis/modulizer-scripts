@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# boost-sweep [--all] [--skip-check] [<lib>...]
+#
+# Fork each library in turn and report where it got to. The dependency tree is
+# rebuilt before each one, excluding that library so its generated headers are
+# what resolve rather than the originals.
+#
+# The sweep does not stop at the first failure: the point of it is the table at
+# the end, which says how far every library got.
+#
+# Options:
+#   --all          sweep every library in config/libraries.txt
+#   --skip-check   assemble the forks without building them
+#   --siblings     rebuild each fork against the converted forks of its
+#                  dependencies, rather than against their original headers
+#
+# Environment: as boost-fork
+
+source "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
+mz_handle_help "${1:-}"
+
+ALL=0 SIBLINGS=0 PASSTHRU=() LIBS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --all)        ALL=1 ;;
+    --siblings)   SIBLINGS=1 ;;
+    --skip-check) PASSTHRU+=("$1") ;;
+    -*)           die "unknown option: $1 (try --help)" ;;
+    *)            LIBS+=("$1") ;;
+  esac
+  shift
+done
+
+[ "$ALL" = 1 ] && while read -r l; do LIBS+=("$l"); done < <(mz_libraries)
+[ ${#LIBS[@]} -gt 0 ] || die "nothing to sweep (try --all, or name a library)"
+
+results=()
+rc=0
+for lib in "${LIBS[@]}"; do
+  # Excluding the library being converted, and — when the forks are meant to
+  # build against each other — every library that already has one.
+  excludes=("$lib")
+  if [ "$SIBLINGS" = 1 ]; then
+    while read -r s; do
+      [ "$s" = "$lib" ] && continue
+      [ -d "$(mz_fork_dir "$s")/modules" ] && excludes+=("$s")
+    done < <(mz_libraries)
+  fi
+  "$MZ_BIN/boost-deps" "${excludes[@]}" >/dev/null
+
+  if out=$("$MZ_BIN/boost-fork" ${PASSTHRU[@]+"${PASSTHRU[@]}"} "$lib" 2>&1); then
+    status=ok
+  else
+    status=FAILED
+    rc=1
+  fi
+  printf '%s\n' "$out" >&2
+  classic=$(printf '%s\n' "$out" | grep -oE 'classic: .*' | head -1)
+  modular=$(printf '%s\n' "$out" | grep -oE 'modular: .*' | head -1)
+  results+=("$(printf '%-16s %-7s %-40s %s' "$lib" "$status" "${classic:--}" "${modular:--}")")
+done
+
+log ""
+log "==== sweep ===="
+printf '%s\n' "${results[@]}"
+exit $rc

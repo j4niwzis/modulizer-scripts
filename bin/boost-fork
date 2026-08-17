@@ -1,0 +1,299 @@
+#!/usr/bin/env bash
+# boost-fork <lib>
+#
+# Assemble a publishable fork of a Boost library converted to C++20 modules,
+# then build and test it both ways.
+#
+# The fork is the upstream repository with its headers replaced by generated
+# ones and the module interface units added alongside. It builds either way:
+#
+#   cmake -B build                              classic, header-only
+#   cmake -B build -DBOOST_<LIB>_MODULES=ON     module units and imports
+#
+# and the library's own tests and examples build and run under both.
+#
+# Tests that do not compile against UPSTREAM are left out of the generated
+# build: they want a Boost library this tree has no way to provide, or they are
+# compile-fail tests. Only what worked before the conversion is held to working
+# after it.
+#
+# Options:
+#   --skip-check   assemble the fork without building it, for when it is only
+#                  needed as a sibling of another fork's build
+#   --keep-logs    leave the generator and build logs in the fork
+#
+# Environment: MZ_SRC, MZ_DEPS, MZ_FORKS, MZ_MODULIZER, MZ_CMAKE, MZ_CXX, MZ_JOBS
+
+source "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
+mz_handle_help "${1:-}"
+
+SKIP_CHECK=0 KEEP_LOGS=0 LIB=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --skip-check) SKIP_CHECK=1 ;;
+    --keep-logs)  KEEP_LOGS=1 ;;
+    -*)           die "unknown option: $1 (try --help)" ;;
+    *)            [ -z "$LIB" ] || die "one library at a time"; LIB=$1 ;;
+  esac
+  shift
+done
+[ -n "$LIB" ] || mz_usage 1
+
+mz_require_repo "$LIB"
+[ -d "$MZ_DEPS" ] || die "no dependency tree in $MZ_DEPS; run: boost-deps $LIB"
+
+REPO=$(mz_repo_dir "$LIB")
+FORK=$(mz_fork_dir "$LIB")
+MODULIZER=$(mz_modulizer)
+CMAKE=$(mz_cmake)
+CXX=$(mz_cxx)
+JOBS=$(mz_jobs)
+MODULE=$(mz_module "$LIB")
+PREFIX=$(mz_prefix "$LIB")
+UPPER=BOOST_$(mz_upper "$LIB")
+
+# Include paths relative to the fork, so the include form the tool records is
+# the one the headers are actually written with (`boost/describe.hpp`, not
+# `describe.hpp`).
+ARGS="-x c++ -std=c++20 -Wno-pragma-once-outside-header -Iinclude -I$MZ_DEPS"
+
+# ---- which tests and examples are worth carrying -------------------------
+# Compiled against the untouched upstream headers. A test that cannot build
+# there says nothing about the conversion.
+#
+# Compiled AND linked, not merely syntax-checked: a syntax check passes for the
+# helper translation units that have no `main` of their own, and those cannot be
+# test executables.
+probe() {
+  local out rc
+  out=$(mktemp)
+  # The flags the fork is built with, so a test kept here is one the build can
+  # actually compile: a few of Boost's constexpr tests only fail under -O3.
+  "$CXX" -std=c++20 -O3 -DNDEBUG -I"$REPO/include" -I"$MZ_DEPS" "$1" -o "$out" \
+    >/dev/null 2>&1
+  rc=$?
+  rm -f "$out"
+  return $rc
+}
+export -f probe
+export CXX REPO MZ_DEPS
+
+cd "$REPO"
+CAND=()
+for d in test example; do
+  [ -d "$d" ] || continue
+  for f in "$d"/*.cpp; do
+    [ -e "$f" ] || continue
+    case "$(basename "$f")" in
+      *fail*)                continue ;;  # compile-fail tests
+      check_cmake_version*)  continue ;;  # reads the repo's own CMakeLists
+    esac
+    CAND+=("$f")
+  done
+done
+
+KEEP=()
+if [ ${#CAND[@]} -gt 0 ]; then
+  while read -r f; do [ -n "$f" ] && KEEP+=("$f"); done < <(
+    printf '%s\n' "${CAND[@]}" |
+      xargs -P "$JOBS" -I{} bash -c 'probe {} && echo {}' | sort || true)
+fi
+log "== $LIB: ${#CAND[@]} candidates, ${#KEEP[@]} build against upstream"
+
+# ---- the fork tree -------------------------------------------------------
+rm -rf "$FORK"
+mkdir -p "$(dirname "$FORK")"
+cp -a "$REPO" "$FORK"
+rm -rf "$FORK/.git" "$FORK/build" "$FORK/CMakeLists.txt" "$FORK/test/CMakeLists.txt"
+
+STAGE=$(mktemp -d)
+cleanup() { rm -rf "$STAGE"; }
+trap cleanup EXIT
+
+cd "$FORK"
+HDRS=()
+while read -r h; do HDRS+=("$h"); done < <(find include -name '*.hpp' | sort)
+[ ${#HDRS[@]} -gt 0 ] || die "$LIB has no headers under include/"
+
+# The tests reach the library's internals. Traced as consumers, the entities
+# they name are exported from the modules that define them.
+ics=()
+for f in ${KEEP[@]+"${KEEP[@]}"}; do ics+=("--internal-consumer-source=$f"); done
+
+# The other libraries that have been converted. Each is imported where its own
+# macro says so, so a fork can be built against a modular sibling or a classic
+# one without the two decisions being tied together.
+sibs=()
+while read -r s; do
+  [ "$s" = "$LIB" ] && continue
+  sibs+=("--sibling-library=boost/$s=$(mz_prefix "$s")")
+done < <(mz_libraries)
+
+set +e
+"$MODULIZER" --full --module-name="$MODULE" --macro-prefix="$PREFIX" \
+  --output-dir="$STAGE" --internal-mode=both --export-all \
+  ${ics[@]+"${ics[@]}"} ${sibs[@]+"${sibs[@]}"} "${HDRS[@]}" -- $ARGS \
+  > "$FORK/.gen.log" 2>&1
+genrc=$?
+set -e
+[ "$genrc" = 0 ] || warn "$LIB: generator exited $genrc (see $FORK/.gen.log)"
+grep -E "include fragments, not modules|headers parse only" "$FORK/.gen.log" |
+  sed 's/^/   /' || true
+
+# ---- install -------------------------------------------------------------
+# Generated headers replace the originals where the include form says they
+# should; the interface units go in modules/.
+rm -rf "$FORK/modules"
+mkdir -p "$FORK/modules"
+(cd "$STAGE" && find . \( -name '*.hpp' -o -name '*.h' \) -not -path './impl/*' |
+  while read -r f; do
+    rel=${f#./}
+    case "$rel" in
+      boost/*) dst="$FORK/include/$rel" ;;
+      *)       dst="$FORK/include/boost/$rel" ;;
+    esac
+    mkdir -p "$(dirname "$dst")"
+    cp "$f" "$dst"
+  done)
+(cd "$STAGE" && find . -name '*.cc' -not -path './impl/*' |
+  while read -r f; do
+    mkdir -p "$FORK/modules/$(dirname "$f")"
+    cp "$f" "$FORK/modules/$f"
+  done)
+
+# ---- dual-mode tests -----------------------------------------------------
+# The tests and examples keep their includes for the classic build; where the
+# module macro is defined those are replaced by imports.
+if [ ${#KEEP[@]} -gt 0 ]; then
+  lhs=()
+  for f in "${HDRS[@]}"; do lhs+=("--library-header=$f"); done
+  set +e
+  "$MODULIZER" --consumers --dual-consumers --module-name="$MODULE" \
+    --macro-prefix="$PREFIX" ${sibs[@]+"${sibs[@]}"} "${lhs[@]}" "${KEEP[@]}" -- $ARGS \
+    > "$FORK/.consumers.log" 2>&1
+  set -e
+fi
+
+# ---- CMake ---------------------------------------------------------------
+{
+cat <<EOF
+cmake_minimum_required(VERSION 3.28 FATAL_ERROR)
+project(boost_${LIB} LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+option(${UPPER}_MODULES "Build the library as C++20 modules" OFF)
+option(${UPPER}_BUILD_TESTS "Build the tests and examples" ON)
+
+# Where the rest of Boost's headers live. The generated headers keep including
+# the libraries this one depends on, which are not part of this fork.
+set(BOOST_DEPS_INCLUDE "" CACHE PATH "Include directory for the other Boost libraries")
+
+if(${UPPER}_MODULES)
+
+  file(GLOB_RECURSE ${LIB}_units CONFIGURE_DEPENDS "\${CMAKE_CURRENT_SOURCE_DIR}/modules/*.cc")
+  add_library(boost_${LIB} STATIC \${${LIB}_units})
+  target_sources(boost_${LIB} PUBLIC FILE_SET CXX_MODULES FILES \${${LIB}_units})
+  # ${PREFIX}_USE_MODULES is deliberately NOT defined here: each unit defines it
+  # for itself right before including its header, and defined for anyone else it
+  # would take from the headers the includes a consumer still needs.
+  # ${PREFIX}_IMPORT_MODULES is the consumer-side switch, set on the tests below.
+
+else()
+
+  add_library(boost_${LIB} INTERFACE)
+
+endif()
+
+# Other converted forks to build modularly alongside this one. Each is added to
+# the module target and switched on by its own macro, which is what makes the
+# choice per-library rather than all-or-nothing.
+set(BOOST_SIBLING_FORKS "" CACHE STRING "Paths to other converted Boost forks")
+if(${UPPER}_MODULES)
+  foreach(_sf IN LISTS BOOST_SIBLING_FORKS)
+    get_filename_component(_sn "\${_sf}" NAME)
+    string(TOUPPER "\${_sn}" _SN)
+    file(GLOB_RECURSE _su CONFIGURE_DEPENDS "\${_sf}/modules/*.cc")
+    # BASE_DIRS: the sibling's units live outside this project's source tree.
+    target_sources(boost_${LIB} PUBLIC
+      FILE_SET CXX_MODULES BASE_DIRS "\${_sf}/modules" FILES \${_su})
+    # Ahead of BOOST_DEPS_INCLUDE, so the sibling's generated headers win over
+    # the originals still sitting in the dependency tree.
+    target_include_directories(boost_${LIB} BEFORE PUBLIC "\${_sf}/include")
+    target_compile_definitions(boost_${LIB} PUBLIC BOOST_\${_SN}X_IMPORT_MODULES=1)
+  endforeach()
+endif()
+
+add_library(Boost::${LIB} ALIAS boost_${LIB})
+
+if(${UPPER}_MODULES)
+  target_include_directories(boost_${LIB} PUBLIC "\${CMAKE_CURRENT_SOURCE_DIR}/include")
+  if(BOOST_DEPS_INCLUDE)
+    target_include_directories(boost_${LIB} PUBLIC "\${BOOST_DEPS_INCLUDE}")
+  endif()
+else()
+  target_include_directories(boost_${LIB} INTERFACE "\${CMAKE_CURRENT_SOURCE_DIR}/include")
+  if(BOOST_DEPS_INCLUDE)
+    target_include_directories(boost_${LIB} INTERFACE "\${BOOST_DEPS_INCLUDE}")
+  endif()
+endif()
+
+if(${UPPER}_BUILD_TESTS)
+  enable_testing()
+EOF
+for f in ${KEEP[@]+"${KEEP[@]}"}; do
+  name=$(echo "${f%.cpp}" | tr '/' '_')
+  echo "  add_executable($name \"\${CMAKE_CURRENT_SOURCE_DIR}/$f\")"
+  echo "  target_link_libraries($name PRIVATE boost_${LIB})"
+  echo "  if(${UPPER}_MODULES)"
+  echo "    target_compile_definitions($name PRIVATE ${PREFIX}_IMPORT_MODULES=1)"
+  echo "  endif()"
+  echo "  add_test(NAME $name COMMAND $name)"
+done
+echo "endif()"
+} > "$FORK/CMakeLists.txt"
+
+if [ "$SKIP_CHECK" = 1 ]; then
+  log "   assembled (checks skipped)"
+  exit 0
+fi
+
+# ---- build and test, both ways -------------------------------------------
+check() { # $1 = mode name, $2... = extra cmake args
+  local mode=$1; shift
+  local b="$FORK/.build-$mode" result failed
+  rm -rf "$b"
+  if ! "$CMAKE" -S "$FORK" -B "$b" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+       -DCMAKE_CXX_COMPILER="$CXX" -DBOOST_DEPS_INCLUDE="$MZ_DEPS" "$@" \
+       > "$FORK/.cfg-$mode.log" 2>&1; then
+    log "   $mode: configure failed (see $FORK/.cfg-$mode.log)"
+    return 1
+  fi
+  # -k 0 keeps going after the first failure, so one broken test does not hide
+  # the state of the rest.
+  if "$CMAKE" --build "$b" -j"$JOBS" -- -k 0 > "$FORK/.build-$mode.log" 2>&1; then
+    result=$(cd "$b" && ctest -j"$JOBS" 2>&1 |
+             grep -E "tests passed|tests failed" | head -1)
+    log "   $mode: built, $result"
+    case "$result" in *"100% tests passed"*) return 0 ;; *) return 1 ;; esac
+  fi
+  failed=$(grep "^FAILED:" "$FORK/.build-$mode.log" |
+           grep -oE "CMakeFiles/[a-zA-Z0-9_]+\.dir" |
+           sed 's|CMakeFiles/||; s|\.dir||' | sort -u | tr '\n' ' ')
+  log "   $mode: $(echo "$failed" | wc -w) targets failed"
+  log "     $(echo "$failed" | cut -c1-200)"
+  grep -m2 "error:" "$FORK/.build-$mode.log" | sed 's/^/     /' >&2 || true
+  return 1
+}
+
+rc=0
+check classic || rc=1
+check modular "-D${UPPER}_MODULES=ON" || rc=1
+
+if [ "$KEEP_LOGS" = 0 ] && [ "$rc" = 0 ]; then
+  rm -f "$FORK"/.gen.log "$FORK"/.consumers.log "$FORK"/.cfg-*.log "$FORK"/.build-*.log
+  rm -rf "$FORK"/.build-classic "$FORK"/.build-modular
+fi
+exit $rc

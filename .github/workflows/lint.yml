@@ -1,0 +1,46 @@
+name: lint
+
+# The pipeline itself needs Clang 22, CMake 3.28+ and hours of compiling, which
+# is not what a pull request should wait for. What CI can check cheaply is that
+# the scripts parse, that every command answers --help, and that shellcheck is
+# happy with them.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Parse
+        run: for f in bin/* lib/*.sh; do bash -n "$f"; done
+
+      - name: Shellcheck
+        run: shellcheck -S warning bin/* lib/*.sh
+
+      - name: Every command answers --help
+        run: |
+          for f in bin/*; do
+            "$f" --help > /dev/null || { echo "no --help: $f"; exit 1; }
+          done
+
+      - name: The library list names real Boost repositories
+        run: |
+          rc=0
+          while read -r lib; do
+            case "$lib" in ''|\#*) continue ;; esac
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+                   "https://api.github.com/repos/boostorg/$lib")
+            if [ "$code" != 200 ]; then
+              echo "config/libraries.txt: boostorg/$lib -> HTTP $code"
+              rc=1
+            fi
+          done < config/libraries.txt
+          exit $rc

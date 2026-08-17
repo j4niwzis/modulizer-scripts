@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# boost-deps <exclude-lib>...
+#
+# Assemble the shared Boost include tree that a converted fork builds against.
+#
+# A converted library still includes the Boost libraries it depends on, and
+# those have to resolve to something. This stages every other library's headers
+# into one directory, symlinked file by file rather than directory by directory:
+# several Boost repositories contribute to the same directory (boost/detail/
+# among them), and linking the directory would hide whatever the others put
+# there.
+#
+# The libraries named on the command line are left out, so the generated
+# headers in the fork resolve instead of the originals they replace.
+#
+# Environment: MZ_SRC, MZ_DEPS
+
+source "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
+mz_handle_help "${1:-}"
+
+need_cmd python3
+[ -d "$MZ_SRC" ] || die "no upstream checkouts in $MZ_SRC; run: boost-fetch --all --deps"
+
+mkdir -p "$(dirname "$MZ_DEPS")"
+rm -rf "$MZ_DEPS"
+mkdir -p "$MZ_DEPS"
+
+MZ_SRC="$MZ_SRC" MZ_DEPS="$MZ_DEPS" python3 - "$@" <<'PY'
+import os, pathlib, sys
+
+root = pathlib.Path(os.environ['MZ_SRC'])
+dest = pathlib.Path(os.environ['MZ_DEPS'])
+exclude = set(sys.argv[1:])
+
+linked = skipped = 0
+for repo in sorted(p for p in root.iterdir() if p.is_dir()):
+    inc = repo / 'include'
+    if not inc.is_dir():
+        continue
+    # Excluded by REPOSITORY, not by where a header sits. A library owns its
+    # top-level forwarding headers too — boost/shared_ptr.hpp belongs to
+    # smart_ptr — and staging one of those would let the original win over the
+    # generated tree that replaces it.
+    excluded = repo.name in exclude
+    for f in inc.rglob('*'):
+        if not f.is_file():
+            continue
+        # ... except the ABI prefix/suffix fragments. Neither is a translation
+        # unit, so the conversion leaves both as textual includes, and they
+        # still have to resolve somewhere.
+        if excluded and f.name not in ('header.hpp', 'footer.hpp'):
+            skipped += 1
+            continue
+        tgt = dest / f.relative_to(inc)
+        tgt.parent.mkdir(parents=True, exist_ok=True)
+        if not tgt.exists():
+            os.symlink(f, tgt)
+            linked += 1
+
+print(f'deps: {linked} headers staged, {skipped} left to the fork '
+      f'for {sorted(exclude) if exclude else "nothing"}')
+PY

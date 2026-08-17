@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# boost-publish [--dry-run] <lib>...
+#
+# Publish a converted fork as <user>/<lib>-modules on GitHub: the upstream
+# history with one commit on top, so the diff against Boost is the conversion
+# and nothing else.
+#
+# The upstream history comes from the local checkout of boostorg/<lib>, so the
+# published fork is a fork of Boost's repository rather than of anything of
+# ours.
+#
+# Options:
+#   --dry-run    build the commit locally and report it, push nothing
+#   --branch B   branch to push to (default: $MZ_PUBLISH_BRANCH)
+#
+# Requires a GitHub token, from MZ_GITHUB_TOKEN, GITHUB_TOKEN, or the
+# credential store git already uses.
+#
+# Environment: MZ_SRC, MZ_FORKS, MZ_PUB, MZ_GITHUB_USER, MZ_PUBLISH_BRANCH
+
+source "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
+mz_handle_help "${1:-}"
+
+need_cmd git
+need_cmd rsync
+
+DRY=0 LIBS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run)  DRY=1 ;;
+    --branch)   MZ_PUBLISH_BRANCH=${2:?--branch needs a value}; shift ;;
+    --branch=*) MZ_PUBLISH_BRANCH=${1#--branch=} ;;
+    -*)         die "unknown option: $1 (try --help)" ;;
+    *)          LIBS+=("$1") ;;
+  esac
+  shift
+done
+[ ${#LIBS[@]} -gt 0 ] || mz_usage 1
+[ -n "$MZ_GITHUB_USER" ] || die "set MZ_GITHUB_USER to the account to publish under"
+
+# The token: explicit first, then whatever git already has. Never echoed.
+mz_token() {
+  if [ -n "${MZ_GITHUB_TOKEN:-}" ]; then printf '%s' "$MZ_GITHUB_TOKEN"; return; fi
+  if [ -n "${GITHUB_TOKEN:-}" ];    then printf '%s' "$GITHUB_TOKEN";    return; fi
+  local store=${HOME}/.git-credentials
+  if [ -f "$store" ]; then
+    local t
+    t=$(sed -n 's|https://[^:]*:\([^@]*\)@github.com|\1|p' "$store" | head -1)
+    [ -n "$t" ] && { printf '%s' "$t"; return; }
+  fi
+  die "no GitHub token; set MZ_GITHUB_TOKEN"
+}
+
+if [ "$DRY" = 0 ]; then
+  need_cmd curl
+  TOKEN=$(mz_token)
+fi
+
+publish_one() {
+  local lib=$1
+  local fork pub repo base head
+  fork=$(mz_fork_dir "$lib")
+  pub=$MZ_PUB/$lib
+  repo=$lib$MZ_REPO_SUFFIX
+
+  [ -d "$fork/modules" ] || die "no assembled fork for '$lib'; run: boost-fork $lib"
+  mz_require_repo "$lib"
+
+  rm -rf "$pub"
+  mkdir -p "$(dirname "$pub")"
+  git clone -q --no-hardlinks "$(mz_repo_dir "$lib")" "$pub"
+  cd "$pub"
+  base=$(git rev-parse --short HEAD)
+
+  # Replace the worktree with the converted tree, minus the build scratch.
+  git rm -rq --cached . >/dev/null
+  find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+  rsync -a --exclude '.git' --exclude '.build-*' --exclude '.cfg-*.log' \
+        --exclude '.gen.log' --exclude '.consumers.log' "$fork"/ "$pub"/
+
+  git add -A
+  if git diff --cached --quiet; then
+    warn "$lib: the conversion changed nothing; not publishing"
+    return 1
+  fi
+  git -c user.name="$MZ_GITHUB_USER" \
+      -c user.email="${MZ_GITHUB_EMAIL:-$MZ_GITHUB_USER@users.noreply.github.com}" \
+      commit -q -m "Modulize"
+  head=$(git rev-parse --short HEAD)
+  log "   $repo: $base + $head Modulize, $(git show --stat --oneline HEAD | tail -1)"
+
+  if [ "$DRY" = 1 ]; then
+    log "   dry run: not pushing (tree at $pub)"
+    return 0
+  fi
+
+  local code
+  code=$(curl -s -o /dev/null -w "%{http_code}" \
+    -H "Authorization: token $TOKEN" \
+    "https://api.github.com/repos/$MZ_GITHUB_USER/$repo")
+  if [ "$code" != "200" ]; then
+    curl -s -o /dev/null -w "   created: %{http_code}\n" -X POST \
+      -H "Authorization: token $TOKEN" https://api.github.com/user/repos \
+      -d "{\"name\":\"$repo\",\"description\":\"Boost.${lib} converted to C++20 modules by modulizer; builds classic or modular\",\"private\":false}"
+  else
+    info "   repository already exists"
+  fi
+
+  git remote add fork "https://github.com/$MZ_GITHUB_USER/$repo.git"
+  git push -q --force fork "HEAD:refs/heads/$MZ_PUBLISH_BRANCH"
+  log "   pushed https://github.com/$MZ_GITHUB_USER/$repo ($MZ_PUBLISH_BRANCH)"
+}
+
+rc=0
+for lib in "${LIBS[@]}"; do publish_one "$lib" || rc=1; done
+exit $rc

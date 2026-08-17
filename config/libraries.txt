@@ -1,0 +1,28 @@
+# Boost libraries converted to C++20 modules, in dependency order.
+#
+# Order matters: a library is converted after the libraries it depends on, so
+# that when the forks are built against each other (boost-sweep --siblings) the
+# dependency already has module units to import.
+#
+# Each entry is a repository name under https://github.com/boostorg.
+#
+# Boost.Config is deliberately absent. It is a configuration header, not a
+# library: almost all of it is preprocessor, and a module can export
+# declarations but not macros, so converting it would move nothing across and
+# take its macros out of reach of every textual includer.
+
+mp11
+static_assert
+assert
+throw_exception
+core
+describe
+container_hash
+type_index
+io
+functional
+conversion
+variant2
+smart_ptr
+system
+filesystem

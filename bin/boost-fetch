@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# boost-fetch [--all] [<lib>...]
+#
+# Clone the upstream Boost libraries the pipeline converts, from boostorg on
+# GitHub, pinned to a release tag. Nothing here reads a converted fork: the
+# conversion always starts from the library as Boost publishes it.
+#
+#   boost-fetch system            one library and nothing else
+#   boost-fetch --all             every library in config/libraries.txt
+#   boost-fetch --all --deps      those, plus everything they include
+#
+# A library's headers include other Boost libraries, and those have to resolve
+# for it to parse at all. --deps follows the include graph of the checkouts and
+# fetches what is missing, repeating until it settles.
+#
+# Options:
+#   --all       fetch every library listed in config/libraries.txt
+#   --deps      also fetch the libraries the fetched ones include
+#   --tag REF   release tag or branch to check out (default: $MZ_BOOST_TAG)
+#   --force     re-clone even if the checkout is already there
+#
+# Environment: MZ_SRC, MZ_BOOST_TAG, MZ_BOOST_ORG
+
+source "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
+mz_handle_help "${1:-}"
+
+need_cmd git
+
+ALL=0 DEPS=0 FORCE=0 LIBS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --all)   ALL=1 ;;
+    --deps)  DEPS=1 ;;
+    --force) FORCE=1 ;;
+    --tag)   MZ_BOOST_TAG=${2:?--tag needs a value}; shift ;;
+    --tag=*) MZ_BOOST_TAG=${1#--tag=} ;;
+    -*)      die "unknown option: $1 (try --help)" ;;
+    *)       LIBS+=("$1") ;;
+  esac
+  shift
+done
+
+[ "$ALL" = 1 ] && while read -r l; do LIBS+=("$l"); done < <(mz_libraries)
+[ ${#LIBS[@]} -gt 0 ] || die "nothing to fetch (try --all, or name a library)"
+
+mkdir -p "$MZ_SRC"
+
+# A shallow clone of one tag: the pipeline never looks at history, and the full
+# history of every Boost library is a great deal of it.
+fetch_one() {
+  local lib=$1 dir
+  dir=$(mz_repo_dir "$lib")
+  if [ -d "$dir/.git" ] && [ "$FORCE" = 0 ]; then
+    info "  $lib: already present"
+    return 0
+  fi
+  rm -rf "$dir"
+  if git clone -q --depth 1 --branch "$MZ_BOOST_TAG" \
+       "$MZ_BOOST_ORG/$lib.git" "$dir" 2>/dev/null; then
+    log "  $lib: $MZ_BOOST_TAG"
+  else
+    rm -rf "$dir"
+    warn "$lib: no such library at $MZ_BOOST_ORG, or no tag $MZ_BOOST_TAG"
+    return 1
+  fi
+}
+
+# The Boost libraries a checkout includes. `boost/foo/bar.hpp` belongs to `foo`;
+# `boost/foo.hpp` names a library too, but only one that exists — plenty of
+# top-level headers are owned by a library with a different name, and those are
+# resolved by fetching the owner in a later round rather than guessed at here.
+included_libraries() {
+  local dir=$1
+  grep -rhoE '#[[:space:]]*include[[:space:]]*<boost/[A-Za-z0-9_/]+\.hpp>' \
+       "$dir/include" 2>/dev/null |
+    sed -E 's|.*<boost/||; s|\.hpp>||' |
+    awk -F/ 'NF>1 {print $1}' |
+    sort -u
+}
+
+rc=0
+for lib in "${LIBS[@]}"; do fetch_one "$lib" || rc=1; done
+
+if [ "$DEPS" = 1 ]; then
+  # Round by round: each newly fetched library brings its own includes with it.
+  round=0
+  while :; do
+    round=$((round + 1))
+    missing=()
+    for dir in "$MZ_SRC"/*/; do
+      [ -d "$dir/include" ] || continue
+      while read -r dep; do
+        [ -n "$dep" ] || continue
+        [ -d "$MZ_SRC/$dep" ] && continue
+        missing+=("$dep")
+      done < <(included_libraries "${dir%/}")
+    done
+    [ ${#missing[@]} -gt 0 ] || break
+    log "dependency round $round: ${#missing[@]} to fetch"
+    for dep in $(printf '%s\n' "${missing[@]}" | sort -u); do
+      # A miss is normal here: the guess comes from an include path, and not
+      # every directory under boost/ is a repository of its own.
+      fetch_one "$dep" || true
+      # Record the failure so the next round does not try it again.
+      [ -d "$MZ_SRC/$dep" ] || mkdir -p "$MZ_SRC/$dep"
+    done
+  done
+  # Directories created only to remember a failed guess are not checkouts.
+  find "$MZ_SRC" -mindepth 1 -maxdepth 1 -type d -empty -delete
+fi
+
+log "$(find "$MZ_SRC" -mindepth 1 -maxdepth 1 -type d | wc -l) checkouts in $MZ_SRC"
+exit $rc
