@@ -64,14 +64,27 @@ ARGS="-x c++ -std=c++20 -Wno-pragma-once-outside-header -Iinclude -I$MZ_DEPS"
 # Compiled AND linked, not merely syntax-checked: a syntax check passes for the
 # helper translation units that have no `main` of their own, and those cannot be
 # test executables.
-probe() {
+# Two different questions, and conflating them hides both.
+#
+# Whether a test COMPILES against untouched upstream says whether the
+# environment is sound: when the shared dependency tree is staged incompletely
+# almost nothing compiles, and a conversion measured against the remainder
+# measures nothing.
+#
+# Whether it also PASSES says what the conversion is answerable for. A test
+# that already fails upstream -- several here abort on purpose -- counted among
+# the fork's results reads as damage the conversion did.
+probe() { # $1 = file, $2 = "compile" or "pass"
   local out rc
   out=$(mktemp)
   # The flags the fork is built with, so a test kept here is one the build can
   # actually compile: a few of Boost's constexpr tests only fail under -O3.
-  "$CXX" -std=c++20 -O3 -DNDEBUG -I"$REPO/include" -I"$MZ_DEPS" "$1" -o "$out" \
-    >/dev/null 2>&1
-  rc=$?
+  if "$CXX" -std=c++20 -O3 -DNDEBUG -I"$REPO/include" -I"$MZ_DEPS" "$1" -o "$out" \
+       >/dev/null 2>&1; then
+    if [ "$2" = compile ]; then rc=0; else "$out" >/dev/null 2>&1; rc=$?; fi
+  else
+    rc=1
+  fi
   rm -f "$out"
   return $rc
 }
@@ -92,19 +105,28 @@ for d in test example; do
   done
 done
 
-KEEP=()
+COMPILES=() KEEP=()
 if [ ${#CAND[@]} -gt 0 ]; then
-  while read -r f; do [ -n "$f" ] && KEEP+=("$f"); done < <(
+  while read -r f; do [ -n "$f" ] && COMPILES+=("$f"); done < <(
     printf '%s\n' "${CAND[@]}" |
-      xargs -P "$JOBS" -I{} bash -c 'probe {} && echo {}' | sort || true)
+      xargs -P "$JOBS" -I{} bash -c 'probe {} compile && echo {}' | sort || true)
+  if [ ${#COMPILES[@]} -gt 0 ]; then
+    while read -r f; do [ -n "$f" ] && KEEP+=("$f"); done < <(
+      printf '%s\n' "${COMPILES[@]}" |
+        xargs -P "$JOBS" -I{} bash -c 'probe {} pass && echo {}' | sort || true)
+  fi
 fi
-log "== $LIB: ${#CAND[@]} candidates, ${#KEEP[@]} build against upstream"
+log "== $LIB: ${#CAND[@]} candidates, ${#COMPILES[@]} compile, ${#KEEP[@]} pass against upstream"
+if [ $(( ${#COMPILES[@]} + ${#KEEP[@]} )) -gt 0 ] &&
+   [ ${#COMPILES[@]} -ne ${#KEEP[@]} ]; then
+  log "   $(( ${#COMPILES[@]} - ${#KEEP[@]} )) already fail upstream and are left out"
+fi
 # A collapse here is the environment, not the library: a dependency tree that
 # was staged incompletely makes almost every test fail to compile against
 # UNTOUCHED upstream headers, and the run then reports a conversion result that
 # measures nothing.
-if [ ${#CAND[@]} -gt 8 ] && [ $(( ${#KEEP[@]} * 2 )) -lt ${#CAND[@]} ]; then
-  die "only ${#KEEP[@]} of ${#CAND[@]} build against upstream; the dependency tree in $MZ_DEPS looks incomplete (re-run boost-deps $LIB)"
+if [ ${#CAND[@]} -gt 8 ] && [ $(( ${#COMPILES[@]} * 2 )) -lt ${#CAND[@]} ]; then
+  die "only ${#COMPILES[@]} of ${#CAND[@]} COMPILE against upstream; the dependency tree in $MZ_DEPS looks incomplete (re-run boost-deps $LIB)"
 fi
 
 # ---- the fork tree -------------------------------------------------------
@@ -341,9 +363,31 @@ check() { # $1 = mode name, $2... = extra cmake args
   return 1
 }
 
+# The converted forks of this library's own dependencies, for the third
+# configuration. Each is added to the module target and switched on by its own
+# macro, so what is proven is the arrangement a user actually wants: this
+# library as modules, built against dependencies that are modules too.
+siblings=()
+while read -r s; do
+  [ "$s" = "$LIB" ] && continue
+  sf=$(mz_fork_dir "$s")
+  [ -d "$sf/modules" ] && siblings+=("$sf")
+done < <(mz_libraries)
+
 rc=0
 check classic || rc=1
 check modular "-D${UPPER}_MODULES=ON" || rc=1
+# Against modular dependencies. This is where a module's global module fragment
+# stops covering for it: the fragment is pruned to what is decl-reachable from
+# the exported declarations, so an operator found only by ADL is there while a
+# dependency is a textual include and gone once it is a module.
+if [ ${#siblings[@]} -gt 0 ]; then
+  log "   with ${#siblings[@]} modular dependencies: $(basename -a "${siblings[@]}" | tr '\n' ' ')"
+  check modular-deps "-D${UPPER}_MODULES=ON" \
+    "-DBOOST_SIBLING_FORKS=$(IFS=';'; echo "${siblings[*]}")" || rc=1
+else
+  log "   no converted dependencies to build against"
+fi
 
 if [ "$KEEP_LOGS" = 0 ] && [ "$rc" = 0 ]; then
   rm -f "$FORK"/.gen.log "$FORK"/.consumers.log "$FORK"/.cfg-*.log "$FORK"/.build-*.log
