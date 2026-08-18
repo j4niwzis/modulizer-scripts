@@ -79,8 +79,8 @@ probe() { # $1 = file, $2 = "compile" or "pass"
   out=$(mktemp)
   # The flags the fork is built with, so a test kept here is one the build can
   # actually compile: a few of Boost's constexpr tests only fail under -O3.
-  if "$CXX" -std=c++20 -O3 -DNDEBUG -I"$REPO/include" -I"$MZ_DEPS" "$1" -o "$out" \
-       >/dev/null 2>&1; then
+  if "$CXX" -std=c++20 -O3 -DNDEBUG -I"$REPO/include" -I"$MZ_DEPS" "$1" \
+       ${UPSTREAM_LIB:+"$UPSTREAM_LIB"} -o "$out" >/dev/null 2>&1; then
     if [ "$2" = compile ]; then rc=0; else "$out" >/dev/null 2>&1; rc=$?; fi
   else
     rc=1
@@ -88,8 +88,24 @@ probe() { # $1 = file, $2 = "compile" or "pass"
   rm -f "$out"
   return $rc
 }
+# A library with sources of its own is not header-only: its tests do not link
+# without them, and every probe then fails at the link step for a reason that
+# has nothing to do with the conversion.
+UPSTREAM_LIB=
+if compgen -G "$REPO/src/*.cpp" > /dev/null; then
+  _objs=$(mktemp -d)
+  for c in "$REPO"/src/*.cpp; do
+    "$CXX" -std=c++20 -O3 -DNDEBUG -I"$REPO/include" -I"$MZ_DEPS" \
+      -c "$c" -o "$_objs/$(basename "${c%.cpp}").o" >/dev/null 2>&1 || true
+  done
+  if ar rcs "$_objs/libupstream.a" "$_objs"/*.o 2>/dev/null; then
+    UPSTREAM_LIB=$_objs/libupstream.a
+    log "   $LIB has $(ls "$REPO"/src/*.cpp | wc -l) sources of its own; tests link against them"
+  fi
+fi
+
 export -f probe
-export CXX REPO MZ_DEPS
+export CXX REPO MZ_DEPS UPSTREAM_LIB
 
 cd "$REPO"
 CAND=()
@@ -294,6 +310,11 @@ endif()
 add_library(Boost::${LIB} ALIAS boost_${LIB})
 
 if(${UPPER}_MODULES)
+  target_include_directories(boost_${LIB} PUBLIC "\${CMAKE_CURRENT_SOURCE_DIR}/include")
+  if(BOOST_DEPS_INCLUDE)
+    target_include_directories(boost_${LIB} PUBLIC "\${BOOST_DEPS_INCLUDE}")
+  endif()
+elseif(${LIB}_sources)
   target_include_directories(boost_${LIB} PUBLIC "\${CMAKE_CURRENT_SOURCE_DIR}/include")
   if(BOOST_DEPS_INCLUDE)
     target_include_directories(boost_${LIB} PUBLIC "\${BOOST_DEPS_INCLUDE}")
