@@ -1,0 +1,25 @@
+# Tests this library cannot pass when built as modules, and why. One path per
+# line. They are still built and run in the classic configuration, so what they
+# check is not lost — only the arrangement they check it in is unavailable.
+
+# Both define BOOST_NO_EXCEPTIONS before including the library, and then supply
+# the boost::throw_exception the library declares but does not define under it.
+# That is a bargain struck at the point of inclusion: the header is compiled
+# again for this translation unit, sees the macro, and declares the function
+# for the test to fill in.
+#
+# A module is compiled once, on its own, before this translation unit exists.
+# It contains the throwing definition, the macro defined here never reaches it,
+# and the test's own definition — attached to the global module — answers a
+# declaration that is not the one the library calls. Its exit(0) is never
+# reached and the exception it was meant to prevent is thrown:
+#
+#   terminate called after throwing an instance of
+#   'boost::wrapexcept@boost.throw_exception<my_exception>'
+#     what():  std::exception
+#
+# What they check is whether the library honours a consumer's configuration.
+# The module build's answer is that it cannot, and there is no arrangement of
+# the test that changes it.
+test/throw_exception_no_exceptions_test.cpp
+test/throw_exception_no_both_test.cpp
