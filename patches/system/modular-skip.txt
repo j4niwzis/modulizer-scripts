@@ -1,0 +1,14 @@
+# Tests this library cannot pass when built as modules, and why. One path per
+# line. They are still built and run in the classic configuration, so what they
+# check is not lost — only the arrangement they check it in is unavailable.
+
+# Defines BOOST_ENABLE_ASSERT_HANDLER before including the library, so
+# BOOST_ASSERT calls a handler the test supplies. A module unit is compiled
+# once, on its own, long before this translation unit exists: a macro defined
+# here cannot reach it, the assert stays inert, and unsafe_value() then reads a
+# value that is not there.
+#
+#   result_unsafe_value_access2.cpp(43): expression 'r.unsafe_value()' did not
+#                                        throw exception 'assertion_failure'
+#   Segmentation fault
+test/result_unsafe_value_access2.cpp

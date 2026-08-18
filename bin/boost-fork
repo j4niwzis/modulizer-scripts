@@ -120,6 +120,15 @@ rm -rf "$FORK/.git" "$FORK/build" "$FORK/CMakeLists.txt" "$FORK/test/CMakeLists.
 # checked against UNPATCHED upstream too, so it adapts a test rather than
 # bending one into passing.
 PATCHES=$MZ_HOME/patches/$LIB
+# Tests that cannot hold as modules, named with their reason. Reported rather
+# than dropped quietly: a build that silently runs fewer tests reads as a
+# passing one.
+MODULAR_SKIP=""
+if [ -f "$PATCHES/modular-skip.txt" ]; then
+  MODULAR_SKIP=$(grep -vE '^\s*(#|$)' "$PATCHES/modular-skip.txt" || true)
+  [ -n "$MODULAR_SKIP" ] &&
+    log "   classic-only ($(echo "$MODULAR_SKIP" | wc -l)): $(echo $MODULAR_SKIP | tr '\n' ' ')"
+fi
 if [ -d "$PATCHES" ]; then
   for p in "$PATCHES"/*.patch; do
     [ -e "$p" ] || continue
@@ -279,6 +288,16 @@ if(${UPPER}_BUILD_TESTS)
 EOF
 for f in ${KEEP[@]+"${KEEP[@]}"}; do
   name=$(echo "${f%.cpp}" | tr '/' '_')
+  # A test the library cannot pass as modules is built classically only; see
+  # patches/<lib>/modular-skip.txt for which and why.
+  if [ -n "${MODULAR_SKIP:-}" ] && printf '%s\n' $MODULAR_SKIP | grep -qxF "$f"; then
+    echo "  if(NOT ${UPPER}_MODULES)"
+    echo "    add_executable($name \"\${CMAKE_CURRENT_SOURCE_DIR}/$f\")"
+    echo "    target_link_libraries($name PRIVATE boost_${LIB})"
+    echo "    add_test(NAME $name COMMAND $name)"
+    echo "  endif()"
+    continue
+  fi
   echo "  add_executable($name \"\${CMAKE_CURRENT_SOURCE_DIR}/$f\")"
   echo "  target_link_libraries($name PRIVATE boost_${LIB})"
   echo "  if(${UPPER}_MODULES)"
