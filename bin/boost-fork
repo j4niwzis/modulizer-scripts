@@ -373,14 +373,20 @@ check() { # $1 = mode name, $2... = extra cmake args
     result=$(cd "$b" && ctest -j"$JOBS" 2>&1 |
              grep -E "tests passed|tests failed" | head -1)
     log "   $mode: built, $result"
+    [ "$KEEP_LOGS" = 1 ] || rm -rf "$b"
     case "$result" in *"100% tests passed"*) return 0 ;; *) return 1 ;; esac
   fi
+  # The build tree is not needed once its result is known, and the modular-deps
+  # one holds every sibling's module units as well. Fifteen libraries times
+  # three configurations fills a disk, and a build that runs out of space fails
+  # in ways that look like anything but.
   failed=$(grep "^FAILED:" "$FORK/.build-$mode.log" |
            grep -oE "CMakeFiles/[a-zA-Z0-9_]+\.dir" |
            sed 's|CMakeFiles/||; s|\.dir||' | sort -u | tr '\n' ' ')
   log "   $mode: $(echo "$failed" | wc -w) targets failed"
   log "     $(echo "$failed" | cut -c1-200)"
   grep -m2 "error:" "$FORK/.build-$mode.log" | sed 's/^/     /' >&2 || true
+  [ "$KEEP_LOGS" = 1 ] || rm -rf "$b"
   return 1
 }
 
