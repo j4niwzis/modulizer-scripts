@@ -99,6 +99,13 @@ if [ ${#CAND[@]} -gt 0 ]; then
       xargs -P "$JOBS" -I{} bash -c 'probe {} && echo {}' | sort || true)
 fi
 log "== $LIB: ${#CAND[@]} candidates, ${#KEEP[@]} build against upstream"
+# A collapse here is the environment, not the library: a dependency tree that
+# was staged incompletely makes almost every test fail to compile against
+# UNTOUCHED upstream headers, and the run then reports a conversion result that
+# measures nothing.
+if [ ${#CAND[@]} -gt 8 ] && [ $(( ${#KEEP[@]} * 2 )) -lt ${#CAND[@]} ]; then
+  die "only ${#KEEP[@]} of ${#CAND[@]} build against upstream; the dependency tree in $MZ_DEPS looks incomplete (re-run boost-deps $LIB)"
+fi
 
 # ---- the fork tree -------------------------------------------------------
 rm -rf "$FORK"
@@ -120,14 +127,23 @@ while read -r h; do HDRS+=("$h"); done < <(find include -name '*.hpp' | sort)
 ics=()
 for f in ${KEEP[@]+"${KEEP[@]}"}; do ics+=("--internal-consumer-source=$f"); done
 
-# The other libraries that have been converted. Each is imported where its own
-# macro says so, so a fork can be built against a modular sibling or a classic
-# one without the two decisions being tied together.
+# The libraries already converted, as the modules they generated. One
+# --module-replaces per module, each naming every header that module provides,
+# so an include of any of them becomes that import and the narrowest module
+# covering a header is the one chosen. Guarded by the provider's own macro, so
+# a fork can be built against a modular dependency or a classic one without the
+# two decisions being tied together.
 sibs=()
 while read -r s; do
   [ "$s" = "$LIB" ] && continue
-  sibs+=("--sibling-library=boost/$s=$(mz_prefix "$s")")
+  sf=$(mz_fork_dir "$s")
+  [ -d "$sf/modules" ] || continue   # not converted yet in this tree
+  while read -r flag; do
+    [ -n "$flag" ] && sibs+=("$flag")
+  done < <("$MZ_BIN/module-replaces" --guard "$(mz_prefix "$s")_IMPORT_MODULES" \
+             --macros "$sf/include" "$sf/modules" 2>/dev/null)
 done < <(mz_libraries)
+[ ${#sibs[@]} -gt 0 ] && info "   ${#sibs[@]} modules provided by converted dependencies"
 
 set +e
 "$MODULIZER" --full --module-name="$MODULE" --macro-prefix="$PREFIX" \

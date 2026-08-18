@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# module-replaces [--guard MACRO] [--macros] <include-dir> [<modules-dir>]
+#
+# Print the --module-replaces flags for a library that has been converted, one
+# per module it generated:
+#
+#   --module-replaces=boost.mp11.list=boost/mp11/list.hpp,boost/mp11/detail/mp_list_v.hpp,...:guard=...:macros
+#
+# Each entry names every header that module provides — the one it was generated
+# from AND everything that header includes, transitively, from the same
+# library. Importing the module supplies all of those declarations, so an
+# include of any of them has to become that import; left in the global module
+# fragment alongside it, the same entity is declared twice:
+#
+#   error: declaration of 'mp_list_v' in the global module follows
+#          declaration in module boost.mp11.detail.mp_list_v
+#
+# Listing the closure is also what makes the choice between modules meaningful.
+# `boost/mp11/list.hpp` is provided both by `boost.mp11.list` and by the
+# library's umbrella module, which provides everything; the narrowest module
+# covering a header is the one wanted, and it is the one with the fewest
+# headers.
+#
+# The module names come from the generated units when a modules/ directory is
+# given, and are derived from the header paths otherwise.
+#
+# Options:
+#   --guard MACRO   emit :guard=MACRO, so the replacement can be switched off
+#   --macros        emit :macros, so the provider's macros file rides along
+
+source "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
+mz_handle_help "${1:-}"
+
+need_cmd python3
+
+GUARD= MACROS=0 POS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --guard)   GUARD=${2:?--guard needs a value}; shift ;;
+    --guard=*) GUARD=${1#--guard=} ;;
+    --macros)  MACROS=1 ;;
+    -*)        die "unknown option: $1 (try --help)" ;;
+    *)         POS+=("$1") ;;
+  esac
+  shift
+done
+[ ${#POS[@]} -ge 1 ] || mz_usage 1
+INCLUDE_DIR=${POS[0]}
+MODULES_DIR=${POS[1]:-}
+[ -d "$INCLUDE_DIR" ] || die "not a directory: $INCLUDE_DIR"
+
+GUARD="$GUARD" MACROS="$MACROS" INCLUDE_DIR="$INCLUDE_DIR" \
+MODULES_DIR="$MODULES_DIR" python3 - <<'PY'
+import os, pathlib, re, sys
+
+include_dir = pathlib.Path(os.environ['INCLUDE_DIR']).resolve()
+modules_dir = os.environ.get('MODULES_DIR') or ''
+guard = os.environ.get('GUARD') or ''
+macros = os.environ.get('MACROS') == '1'
+
+INCLUDE_RE = re.compile(rb'^\s*#\s*include\s*[<"]([^>"]+)[>"]', re.M)
+MODULE_RE = re.compile(r'^\s*export\s+module\s+([A-Za-z0-9_.]+)\s*;', re.M)
+
+# Every header of this library, keyed by the path an include would spell.
+# The conversion's own artifacts are not among them: a macros file and the
+# export header carry macros, which is exactly what a module cannot provide, so
+# they stay textual includes and must never be replaced by an import.
+def generated(name):
+    return name.endswith('_macros.h') or name.endswith('-macros.h') or \
+           name.endswith('_export.h')
+
+headers = {}
+for p in include_dir.rglob('*'):
+    if p.is_file() and p.suffix in ('.hpp', '.h', '.hxx', '.ipp') \
+            and not generated(p.name):
+        headers[str(p.relative_to(include_dir))] = p
+
+# Direct includes that land inside this library. An include of something else —
+# another library, the standard library — is not this module's to provide.
+direct = {}
+for rel, path in headers.items():
+    here = pathlib.PurePosixPath(rel).parent
+    found = set()
+    for m in INCLUDE_RE.finditer(path.read_bytes()):
+        inc = m.group(1).decode('utf-8', 'replace')
+        # As written, or relative to the including header — both spellings
+        # resolve to the same file and only one of them is a key here.
+        for cand in (inc, str(here / inc) if str(here) != '.' else inc):
+            cand = str(pathlib.PurePosixPath(cand))
+            if cand in headers:
+                found.add(cand)
+                break
+    direct[rel] = found
+
+# The transitive closure, iteratively so a cycle among headers terminates.
+closure = {}
+for rel in headers:
+    seen = {rel}
+    stack = [rel]
+    while stack:
+        for nxt in direct[stack.pop()]:
+            if nxt not in seen:
+                seen.add(nxt)
+                stack.append(nxt)
+    closure[rel] = seen
+
+# The module each header became. The generated unit says so outright; without
+# one the name is derived from the path, which is the same rule the conversion
+# used.
+module_of = {}
+if modules_dir:
+    md = pathlib.Path(modules_dir)
+    for unit in md.rglob('*.cc'):
+        rel = str(unit.relative_to(md))
+        m = MODULE_RE.search(unit.read_text(errors='replace'))
+        if not m:
+            continue
+        # The units are laid out under their own root, which need not be the
+        # one the headers are included from: `modules/mp11/function.cc` pairs
+        # with `include/boost/mp11/function.hpp`. Match on the tail of the
+        # path, at a segment boundary.
+        stem = rel[:-3]
+        for h in headers:
+            hs = str(pathlib.PurePosixPath(h).with_suffix(''))
+            if hs == stem or hs.endswith('/' + stem):
+                module_of[h] = m.group(1)
+                break
+
+def derived(rel):
+    return str(pathlib.PurePosixPath(rel).with_suffix('')).replace('/', '.')
+
+opts = ''
+if guard:
+    opts += f':guard={guard}'
+if macros:
+    opts += ':macros'
+
+emitted = 0
+for rel in sorted(headers):
+    mod = module_of.get(rel) or (derived(rel) if not modules_dir else None)
+    # With a modules/ directory the units are the authority on what became a
+    # module. A header with none is a fragment or parses only in context, and
+    # importing a module nobody generated would not link.
+    if not mod:
+        continue
+    print(f'--module-replaces={mod}=' + ','.join(sorted(closure[rel])) + opts)
+    emitted += 1
+
+if not emitted:
+    print('module-replaces: no modules found', file=sys.stderr)
+    sys.exit(1)
+PY
