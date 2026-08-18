@@ -1,0 +1,187 @@
+Tie each source-location assertion to the line it captures, not to a literal
+
+The conversion rewrites a consumer's includes into imports, which changes how
+many lines stand above the code. Every source location the file reports moves
+with them, and a test that names the line outright then fails by exactly that
+shift:
+
+  ec_location_test.cpp(36): test 'ec.location().line() == 27'
+                            ('26' == '27') failed
+
+The line a BOOST_CURRENT_LOCATION sits on is the thing under test, so the
+assertion asks __LINE__ for it rather than repeating a number that was only
+ever true for one arrangement of the file. Verified against UNPATCHED upstream
+headers as well: the patched tests pass there too, so this is not a test bent
+into passing.
+
+--- a/test/ec_location_test.cpp	2026-08-18 04:51:39.654982205 +0000
++++ b/test/ec_location_test.cpp	2026-08-18 04:52:06.495320628 +0000
+@@ -25,6 +25,7 @@
+ 
+     {
+         BOOST_STATIC_CONSTEXPR boost::source_location loc = BOOST_CURRENT_LOCATION;
++        unsigned const expected_line = __LINE__ - 1;
+ 
+         boost::system::error_code ec( val, cat, &loc );
+ 
+@@ -34,7 +35,7 @@
+         BOOST_TEST( ec.failed() );
+ 
+         BOOST_TEST( ec.has_location() );
+-        BOOST_TEST_EQ( ec.location().line(), 27 );
++        BOOST_TEST_EQ( ec.location().line(), expected_line );
+     }
+ 
+     {
+@@ -49,6 +50,7 @@
+         BOOST_TEST_EQ( ec.location().line(), 0 );
+ 
+         BOOST_STATIC_CONSTEXPR boost::source_location loc = BOOST_CURRENT_LOCATION;
++        unsigned const expected_line = __LINE__ - 1;
+ 
+         ec = boost::system::error_code( val, cat, &loc );
+ 
+@@ -58,7 +60,7 @@
+         BOOST_TEST( ec.failed() );
+ 
+         BOOST_TEST( ec.has_location() );
+-        BOOST_TEST_EQ( ec.location().line(), 51 );
++        BOOST_TEST_EQ( ec.location().line(), expected_line );
+     }
+ 
+     {
+@@ -73,6 +75,7 @@
+         BOOST_TEST_EQ( ec.location().line(), 0 );
+ 
+         BOOST_STATIC_CONSTEXPR boost::source_location loc = BOOST_CURRENT_LOCATION;
++        unsigned const expected_line = __LINE__ - 1;
+ 
+         ec.assign( val, cat, &loc );
+ 
+@@ -82,7 +85,7 @@
+         BOOST_TEST( ec.failed() );
+ 
+         BOOST_TEST( ec.has_location() );
+-        BOOST_TEST_EQ( ec.location().line(), 75 );
++        BOOST_TEST_EQ( ec.location().line(), expected_line );
+     }
+ 
+     {
+@@ -96,6 +99,7 @@
+         BOOST_TEST_EQ( ec.location().line(), 0 );
+ 
+         BOOST_STATIC_CONSTEXPR boost::source_location loc = BOOST_CURRENT_LOCATION;
++        unsigned const expected_line = __LINE__ - 1;
+ 
+         ec.assign( val, cat, &loc );
+ 
+@@ -105,7 +109,7 @@
+         BOOST_TEST( ec.failed() );
+ 
+         BOOST_TEST( ec.has_location() );
+-        BOOST_TEST_EQ( ec.location().line(), 98 );
++        BOOST_TEST_EQ( ec.location().line(), expected_line );
+     }
+ 
+     return boost::report_errors();
+--- a/test/ec_location_test2.cpp	2026-08-18 04:51:39.660616726 +0000
++++ b/test/ec_location_test2.cpp	2026-08-18 04:52:06.495461081 +0000
+@@ -71,6 +71,7 @@
+ 
+     {
+         BOOST_STATIC_CONSTEXPR boost::source_location loc = BOOST_CURRENT_LOCATION;
++        unsigned const expected_line = __LINE__ - 1;
+ 
+         sys::error_code ec( einval, &loc );
+ 
+@@ -80,7 +81,7 @@
+         BOOST_TEST( ec.failed() );
+ 
+         BOOST_TEST( ec.has_location() );
+-        BOOST_TEST_EQ( ec.location().line(), 73 );
++        BOOST_TEST_EQ( ec.location().line(), expected_line );
+     }
+ 
+     {
+@@ -97,6 +98,7 @@
+ 
+     {
+         BOOST_STATIC_CONSTEXPR boost::source_location loc = BOOST_CURRENT_LOCATION;
++        unsigned const expected_line = __LINE__ - 1;
+ 
+         sys::error_code ec( none, &loc );
+ 
+@@ -121,6 +123,7 @@
+         BOOST_TEST_EQ( ec.location().line(), 0 );
+ 
+         BOOST_STATIC_CONSTEXPR boost::source_location loc = BOOST_CURRENT_LOCATION;
++        unsigned const expected_line = __LINE__ - 1;
+ 
+         ec = sys::error_code( einval, &loc );
+ 
+@@ -130,7 +133,7 @@
+         BOOST_TEST( ec.failed() );
+ 
+         BOOST_TEST( ec.has_location() );
+-        BOOST_TEST_EQ( ec.location().line(), 123 );
++        BOOST_TEST_EQ( ec.location().line(), expected_line );
+     }
+ 
+     {
+@@ -145,6 +148,7 @@
+         BOOST_TEST_EQ( ec.location().line(), 0 );
+ 
+         BOOST_STATIC_CONSTEXPR boost::source_location loc = BOOST_CURRENT_LOCATION;
++        unsigned const expected_line = __LINE__ - 1;
+ 
+         ec = sys::error_code( none, &loc );
+ 
+@@ -169,6 +173,7 @@
+         BOOST_TEST_EQ( ec.location().line(), 0 );
+ 
+         BOOST_STATIC_CONSTEXPR boost::source_location loc = BOOST_CURRENT_LOCATION;
++        unsigned const expected_line = __LINE__ - 1;
+ 
+         ec.assign( einval, &loc );
+ 
+@@ -178,7 +183,7 @@
+         BOOST_TEST( ec.failed() );
+ 
+         BOOST_TEST( ec.has_location() );
+-        BOOST_TEST_EQ( ec.location().line(), 171 );
++        BOOST_TEST_EQ( ec.location().line(), expected_line );
+     }
+ 
+     {
+@@ -193,6 +198,7 @@
+         BOOST_TEST_EQ( ec.location().line(), 0 );
+ 
+         BOOST_STATIC_CONSTEXPR boost::source_location loc = BOOST_CURRENT_LOCATION;
++        unsigned const expected_line = __LINE__ - 1;
+ 
+         ec.assign( none, &loc );
+ 
+@@ -218,6 +224,7 @@
+ 
+     {
+         BOOST_STATIC_CONSTEXPR boost::source_location loc = BOOST_CURRENT_LOCATION;
++        unsigned const expected_line = __LINE__ - 1;
+ 
+         sys::error_code ec( e2inval, &loc );
+ 
+@@ -241,6 +248,7 @@
+         BOOST_TEST_EQ( ec.location().line(), 0 );
+ 
+         BOOST_STATIC_CONSTEXPR boost::source_location loc = BOOST_CURRENT_LOCATION;
++        unsigned const expected_line = __LINE__ - 1;
+ 
+         ec = sys::error_code( e2inval, &loc );
+ 
+@@ -264,6 +272,7 @@
+         BOOST_TEST_EQ( ec.location().line(), 0 );
+ 
+         BOOST_STATIC_CONSTEXPR boost::source_location loc = BOOST_CURRENT_LOCATION;
++        unsigned const expected_line = __LINE__ - 1;
+ 
+         ec.assign( e2inval, &loc );
+ 

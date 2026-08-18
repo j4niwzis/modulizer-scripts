@@ -82,6 +82,21 @@ top, so the diff against Boost is the conversion itself.
 
 Each takes `--help`.
 
+## Patches
+
+`patches/<lib>/*.patch` are applied to a fork after it is copied from upstream
+and before it is converted.
+
+They exist for one thing: a conversion changes how many lines stand above a
+consumer's code, so every source location the file reports moves, and a test
+that names a line outright fails by exactly that shift. Such a test is patched
+to ask `__LINE__` for the line it is about.
+
+A patch must apply cleanly or the run stops — a patch that has drifted from its
+upstream is worse than none. Each is also checked against *unpatched* upstream:
+the patched test has to pass there too, so a patch adapts a test rather than
+bending one into passing.
+
 ## Configuration
 
 Every path is an environment variable with a default, so a checkout works

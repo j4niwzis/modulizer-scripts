@@ -113,6 +113,24 @@ mkdir -p "$(dirname "$FORK")"
 cp -a "$REPO" "$FORK"
 rm -rf "$FORK/.git" "$FORK/build" "$FORK/CMakeLists.txt" "$FORK/test/CMakeLists.txt"
 
+# ---- patches --------------------------------------------------------------
+# A conversion changes how many lines stand above a consumer's code, so a test
+# that names a source line outright fails by exactly that shift. Those tests
+# are patched to ask __LINE__ for the line they are about. Each patch is
+# checked against UNPATCHED upstream too, so it adapts a test rather than
+# bending one into passing.
+PATCHES=$MZ_HOME/patches/$LIB
+if [ -d "$PATCHES" ]; then
+  for p in "$PATCHES"/*.patch; do
+    [ -e "$p" ] || continue
+    if patch -s -p1 -d "$FORK" < "$p"; then
+      log "   patched: $(basename "$p")"
+    else
+      die "$(basename "$p") does not apply to $LIB; it was written for a different upstream"
+    fi
+  done
+fi
+
 STAGE=$(mktemp -d)
 cleanup() { rm -rf "$STAGE"; }
 trap cleanup EXIT
