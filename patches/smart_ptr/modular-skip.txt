@@ -1,0 +1,21 @@
+# Tests this library cannot pass when built as modules, and why. One path per
+# line. They are still built and run in the classic configuration, so what they
+# check is not lost — only the arrangement they check it in is unavailable.
+
+# Defines BOOST_ENABLE_ASSERT_HANDLER before including the library, then
+# supplies the boost::assertion_failed that BOOST_ASSERT is meant to call, and
+# counts the calls. The bargain is struck at the point of inclusion: the header
+# is compiled again for this translation unit, sees the macro, and routes the
+# assert to the handler.
+#
+# A module is compiled once, before this translation unit exists. It holds the
+# assert as the macro read there decided, this one never reaches it, and the
+# handler is never called:
+#
+#   shared_from_raw_test6.cpp(47): test 'assertion_failed_ == 1' ('0' == '1')
+#                                  failed in function 'int main()'
+#
+# What it checks is that shared_from_raw on a stack object asserts. The module
+# build cannot be asked that question, and no arrangement of the test changes
+# it.
+test/shared_from_raw_test6.cpp
