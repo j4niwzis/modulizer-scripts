@@ -398,6 +398,36 @@ if [ ${#siblings[@]} -gt 0 ]; then
       fi
     done < <(mz_libraries)
   done
+  # Only the ones this build actually reads. A dependent that plays no part in
+  # building or testing this library is nobody's problem here: its own
+  # conversion is owed when something that uses it is converted, not now.
+  if [ -n "$owed" ]; then
+    # Only the directories that are there: a library with no examples is
+    # ordinary, and grep reports a missing path as an error, which under
+    # `set -e` takes the whole run down without saying a word.
+    look=""
+    for d_ in "$FORK/include" "$FORK/test" "$FORK/example"; do
+      [ -d "$d_" ] && look="$look $d_"
+    done
+    used=""
+    [ -n "$look" ] && used=$(grep -rhoE '#[[:space:]]*include[[:space:]]*<[^>]+>' \
+                               $look 2>/dev/null |
+                               tr -d '<>' | sed 's/.*include[[:space:]]*//' |
+                               sort -u || true)
+    reached=""
+    for d in $owed; do
+      droot=$(mz_repo_dir "$d")/include
+      [ -d "$droot" ] || continue
+      while read -r inc; do
+        [ -z "$inc" ] && continue
+        if [ -e "$droot/$inc" ]; then
+          case " $reached " in *" $d "*) ;; *) reached="$reached $d" ;; esac
+          break
+        fi
+      done <<< "$used"
+    done
+    owed="$reached"
+  fi
   if [ -n "$owed" ]; then
     die "$LIB: converted libraries have dependents that are still headers:$owed
    Converting B obliges every A that depends on B. Convert them, or drop the
