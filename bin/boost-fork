@@ -351,6 +351,62 @@ done
 echo "endif()"
 } > "$FORK/CMakeLists.txt"
 
+# ---- the arrangement must be one the conversion supports ------------------
+siblings=()
+while read -r s_; do
+  [ "$s_" = "$LIB" ] && continue
+  sf_=$(mz_fork_dir "$s_")
+  [ -d "$sf_/modules" ] && siblings+=("$sf_")
+done < <(mz_libraries)
+
+# A library that is a module must be imported by everyone who uses it, and a
+# library still built as headers cannot import anything. So converting B
+# obliges every A that depends on B: left as headers, A goes on writing
+# `#include <b/thing.hpp>`, which now resolves to B's GENERATED header and is
+# read textually by a translation unit that has already imported B --
+#
+#   error: declaration of 'refcount_ptr' in the global module follows
+#          declaration in module boost.exception.exception
+#
+# The include is not A's mistake and not B's; the arrangement is simply one
+# the conversion does not support, and it fails deep inside a test rather than
+# where the decision was made. So it is named here instead.
+if [ ${#siblings[@]} -gt 0 ]; then
+  owed=""
+  for sf in "${siblings[@]}"; do
+    sname=$(basename "$sf")
+    # The include forms a consumer of that sibling writes, as directory names
+    # under its include root: `boost/throw_exception.hpp`, `boost/mp11/...`.
+    sroot=$(mz_repo_dir "$sname")/include
+    [ -d "$sroot" ] || continue
+    heads=$(cd "$sroot" && find . -name '*.hpp' -o -name '*.h' 2>/dev/null |
+              sed 's|^\./||' | head -400)
+    [ -n "$heads" ] || continue
+    while read -r other; do
+      [ -z "$other" ] && continue
+      [ "$other" = "$LIB" ] && continue
+      [ "$other" = "$sname" ] && continue
+      # Already converted: it imports, which is the arrangement that works.
+      [ -d "$(mz_fork_dir "$other")/modules" ] && continue
+      oroot=$(mz_repo_dir "$other")/include
+      [ -d "$oroot" ] || continue
+      if printf '%s\n' "$heads" |
+           grep -qFf - <(grep -rhoE '#[[:space:]]*include[[:space:]]*<[^>]+>' \
+                           "$oroot" 2>/dev/null | tr -d '<>' |
+                           sed 's/.*include[[:space:]]*//'); then
+        case " $owed " in *" $other "*) ;; *) owed="$owed $other" ;; esac
+      fi
+    done < <(mz_libraries)
+  done
+  if [ -n "$owed" ]; then
+    die "$LIB: converted libraries have dependents that are still headers:$owed
+   Converting B obliges every A that depends on B. Convert them, or drop the
+   sibling forks they depend on -- a header build of a dependent reads the
+   generated header of a module and declares its entities a second time."
+  fi
+fi
+
+
 if [ "$SKIP_CHECK" = 1 ]; then
   log "   assembled (checks skipped)"
   exit 0
@@ -394,13 +450,6 @@ check() { # $1 = mode name, $2... = extra cmake args
 # configuration. Each is added to the module target and switched on by its own
 # macro, so what is proven is the arrangement a user actually wants: this
 # library as modules, built against dependencies that are modules too.
-siblings=()
-while read -r s; do
-  [ "$s" = "$LIB" ] && continue
-  sf=$(mz_fork_dir "$s")
-  [ -d "$sf/modules" ] && siblings+=("$sf")
-done < <(mz_libraries)
-
 rc=0
 check classic || rc=1
 check modular "-D${UPPER}_MODULES=ON" || rc=1
