@@ -65,16 +65,39 @@ fetch_one() {
   fi
 }
 
-# The Boost libraries a checkout includes. `boost/foo/bar.hpp` belongs to `foo`;
-# `boost/foo.hpp` names a library too, but only one that exists — plenty of
-# top-level headers are owned by a library with a different name, and those are
-# resolved by fetching the owner in a later round rather than guessed at here.
+# The Boost libraries a checkout includes. Both include forms name one:
+# `boost/foo/bar.hpp` and `boost/foo.hpp` alike are read as `foo`.
+#
+# Plenty of guesses are wrong — `boost/weak_ptr.hpp` belongs to smart_ptr,
+# `boost/concept/` to concept_check, `boost/pending/` to graph — and each
+# costs a warning and an empty directory that stops the next round retrying
+# it. That is the cheaper mistake: a guess that misses is noise, while a
+# library never named is one the tests resolve from whatever Boost the
+# machine has installed, and that failure arrives later wearing a disguise.
 included_libraries() {
   local dir=$1
+  # The tests and examples too, not only the headers: the pipeline builds and
+  # runs them, and they reach for libraries the headers never do. Boost.SmartPtr
+  # is a header-only library whose *_mt_test files want Boost.Bind, and with
+  # only the headers read it is never fetched, never staged, and resolved from
+  # whatever Boost the machine has installed -- where an x-macro header read
+  # out of its wrapper says something unrecognisable:
+  #
+  #   bind/detail/bind_cc.hpp:16: error: unknown type name 'BOOST_BIND_ST'
+  local look=""
+  local d
+  for d in "$dir/include" "$dir/test" "$dir/example"; do
+    [ -d "$d" ] && look="$look $d"
+  done
+  [ -n "$look" ] || return 0
   grep -rhoE '#[[:space:]]*include[[:space:]]*<boost/[A-Za-z0-9_/]+\.hpp>' \
-       "$dir/include" 2>/dev/null |
+       $look 2>/dev/null |
     sed -E 's|.*<boost/||; s|\.hpp>||' |
-    awk -F/ 'NF>1 {print $1}' |
+    # `boost/foo/bar.hpp` names foo; `boost/foo.hpp` names foo as well. The
+    # second was dropped on the grounds that a later round would reach the
+    # owner through its directory form -- which holds only where something
+    # includes that form, and nothing includes `boost/bind/`.
+    awk -F/ '{print $1}' |
     sort -u
 }
 
