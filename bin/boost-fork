@@ -305,6 +305,21 @@ if(${UPPER}_MODULES)
     target_include_directories(boost_${LIB} BEFORE PUBLIC "\${_sf}/include")
     target_compile_definitions(boost_${LIB} PUBLIC BOOST_\${_SN}X_IMPORT_MODULES=1)
   endforeach()
+  # And this library's own switch, for the siblings' units. A sibling that
+  # depends on this library is compiled INTO this target, and its module unit
+  # reaches what this library declares two ways, both of which this macro
+  # gates: the import it writes under the switch, and -- failing that -- the
+  # include in its header, which its own USE_MODULES has already taken away.
+  # Without it neither happens:
+  #
+  #   verbose_terminate_handler.hpp:68: error: missing '#include
+  #     "boost/assert/source_location.hpp"'; 'source_location' must be
+  #     declared before it is used
+  #
+  # This library is not among its own siblings, so nothing else says it.
+  if(BOOST_SIBLING_FORKS)
+    target_compile_definitions(boost_${LIB} PUBLIC ${PREFIX}_IMPORT_MODULES=1)
+  endif()
 endif()
 
 add_library(Boost::${LIB} ALIAS boost_${LIB})
