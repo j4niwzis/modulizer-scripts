@@ -467,6 +467,17 @@ if [ ${#siblings[@]} -gt 0 ]; then
     for d_ in "$FORK/include" "$FORK/test" "$FORK/example"; do
       [ -d "$d_" ] && look="$look $d_"
     done
+    # A sibling's units are compiled into this target, so what its headers
+    # reach is what this build reads. container_hash reads boost/describe,
+    # describe reads mp11, and mp11 is a module here: the describe header
+    # lands in container_hash's purview and declares mp11's entities a
+    # second time. Looking only at this library's own sources misses it,
+    # because assert names describe nowhere.
+    for sf in "${siblings[@]}"; do
+      for d_ in "$sf/include" "$sf/modules"; do
+        [ -d "$d_" ] && look="$look $d_"
+      done
+    done
     used=""
     [ -n "$look" ] && used=$(grep -rhoE '#[[:space:]]*include[[:space:]]*<[^>]+>' \
                                $look 2>/dev/null |
