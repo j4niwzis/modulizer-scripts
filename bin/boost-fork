@@ -272,6 +272,10 @@ option(${UPPER}_BUILD_TESTS "Build the tests and examples" ON)
 # the libraries this one depends on, which are not part of this fork.
 set(BOOST_DEPS_INCLUDE "" CACHE PATH "Include directory for the other Boost libraries")
 
+# The library's own implementation, if it has one. Not module units: the
+# conversion does not touch them.
+file(GLOB ${LIB}_sources CONFIGURE_DEPENDS "\${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+
 if(${UPPER}_MODULES)
 
   file(GLOB_RECURSE ${LIB}_units CONFIGURE_DEPENDS "\${CMAKE_CURRENT_SOURCE_DIR}/modules/*.cc")
@@ -284,7 +288,19 @@ if(${UPPER}_MODULES)
 
 else()
 
-  add_library(boost_${LIB} INTERFACE)
+  # A library with sources of its own is not header-only, and its tests do not
+  # link without them:
+  #
+  #   undefined reference to
+  #     boost::filesystem::path::lexically_relative(path const&) const
+  #
+  # The conversion leaves them where they are -- they are not module units --
+  # so the classic build is the one that has to compile them.
+  if(${LIB}_sources)
+    add_library(boost_${LIB} STATIC \${${LIB}_sources})
+  else()
+    add_library(boost_${LIB} INTERFACE)
+  endif()
 
 endif()
 
