@@ -1,0 +1,20 @@
+# Tests this library cannot pass when built as modules, and why. One path per
+# line. They are still built and run in the classic configuration, so what they
+# check is not lost — only the arrangement they check it in is unavailable.
+
+# Defines BOOST_FILESYSTEM_DEPRECATED and BOOST_FILESYSTEM_ALLOW_DEPRECATED
+# before including the library, and then uses the constructors those macros
+# turn back on. That is a bargain struck at the point of inclusion: the header
+# is compiled again for this translation unit, sees the macros, and declares
+# the deprecated overloads for the test to call.
+#
+# A module is compiled once, on its own, before this translation unit exists.
+# It holds the header as the macros read there decided — which is with the
+# deprecated overloads left out — and the ones defined here never reach it:
+#
+#   deprecated_test.cpp(54): error: no matching constructor for initialization
+#                                   of 'path'
+#
+# What it checks is that the library still offers its old interface when asked.
+# The module build cannot be asked, and no arrangement of the test changes it.
+test/deprecated_test.cpp
