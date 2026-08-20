@@ -359,6 +359,49 @@ while read -r s_; do
   [ -d "$sf_/modules" ] && siblings+=("$sf_")
 done < <(mz_libraries)
 
+if [ "$SKIP_CHECK" = 1 ]; then
+  log "   assembled (checks skipped)"
+  exit 0
+fi
+
+# ---- build and test, both ways -------------------------------------------
+check() { # $1 = mode name, $2... = extra cmake args
+  local mode=$1; shift
+  local b="$FORK/.build-$mode" result failed
+  rm -rf "$b"
+  if ! "$CMAKE" -S "$FORK" -B "$b" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+       -DCMAKE_CXX_COMPILER="$CXX" -DBOOST_DEPS_INCLUDE="$MZ_DEPS" "$@" \
+       > "$FORK/.cfg-$mode.log" 2>&1; then
+    log "   $mode: configure failed (see $FORK/.cfg-$mode.log)"
+    return 1
+  fi
+  # -k 0 keeps going after the first failure, so one broken test does not hide
+  # the state of the rest.
+  if "$CMAKE" --build "$b" -j"$JOBS" -- -k 0 > "$FORK/.build-$mode.log" 2>&1; then
+    result=$(cd "$b" && ctest -j"$JOBS" 2>&1 |
+             grep -E "tests passed|tests failed" | head -1)
+    log "   $mode: built, $result"
+    [ "$KEEP_LOGS" = 1 ] || rm -rf "$b"
+    case "$result" in *"100% tests passed"*) return 0 ;; *) return 1 ;; esac
+  fi
+  # The build tree is not needed once its result is known, and the modular-deps
+  # one holds every sibling's module units as well. Fifteen libraries times
+  # three configurations fills a disk, and a build that runs out of space fails
+  # in ways that look like anything but.
+  failed=$(grep "^FAILED:" "$FORK/.build-$mode.log" |
+           grep -oE "CMakeFiles/[a-zA-Z0-9_]+\.dir" |
+           sed 's|CMakeFiles/||; s|\.dir||' | sort -u | tr '\n' ' ')
+  log "   $mode: $(echo "$failed" | wc -w) targets failed"
+  log "     $(echo "$failed" | cut -c1-200)"
+  grep -m2 "error:" "$FORK/.build-$mode.log" | sed 's/^/     /' >&2 || true
+  [ "$KEEP_LOGS" = 1 ] || rm -rf "$b"
+  return 1
+}
+
+# The converted forks of this library's own dependencies, for the third
+# configuration. Each is added to the module target and switched on by its own
+# macro, so what is proven is the arrangement a user actually wants: this
+# library as modules, built against dependencies that are modules too.
 # A library that is a module must be imported by everyone who uses it, and a
 # library still built as headers cannot import anything. So converting B
 # obliges every A that depends on B: left as headers, A goes on writing
@@ -436,50 +479,6 @@ if [ ${#siblings[@]} -gt 0 ]; then
   fi
 fi
 
-
-if [ "$SKIP_CHECK" = 1 ]; then
-  log "   assembled (checks skipped)"
-  exit 0
-fi
-
-# ---- build and test, both ways -------------------------------------------
-check() { # $1 = mode name, $2... = extra cmake args
-  local mode=$1; shift
-  local b="$FORK/.build-$mode" result failed
-  rm -rf "$b"
-  if ! "$CMAKE" -S "$FORK" -B "$b" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-       -DCMAKE_CXX_COMPILER="$CXX" -DBOOST_DEPS_INCLUDE="$MZ_DEPS" "$@" \
-       > "$FORK/.cfg-$mode.log" 2>&1; then
-    log "   $mode: configure failed (see $FORK/.cfg-$mode.log)"
-    return 1
-  fi
-  # -k 0 keeps going after the first failure, so one broken test does not hide
-  # the state of the rest.
-  if "$CMAKE" --build "$b" -j"$JOBS" -- -k 0 > "$FORK/.build-$mode.log" 2>&1; then
-    result=$(cd "$b" && ctest -j"$JOBS" 2>&1 |
-             grep -E "tests passed|tests failed" | head -1)
-    log "   $mode: built, $result"
-    [ "$KEEP_LOGS" = 1 ] || rm -rf "$b"
-    case "$result" in *"100% tests passed"*) return 0 ;; *) return 1 ;; esac
-  fi
-  # The build tree is not needed once its result is known, and the modular-deps
-  # one holds every sibling's module units as well. Fifteen libraries times
-  # three configurations fills a disk, and a build that runs out of space fails
-  # in ways that look like anything but.
-  failed=$(grep "^FAILED:" "$FORK/.build-$mode.log" |
-           grep -oE "CMakeFiles/[a-zA-Z0-9_]+\.dir" |
-           sed 's|CMakeFiles/||; s|\.dir||' | sort -u | tr '\n' ' ')
-  log "   $mode: $(echo "$failed" | wc -w) targets failed"
-  log "     $(echo "$failed" | cut -c1-200)"
-  grep -m2 "error:" "$FORK/.build-$mode.log" | sed 's/^/     /' >&2 || true
-  [ "$KEEP_LOGS" = 1 ] || rm -rf "$b"
-  return 1
-}
-
-# The converted forks of this library's own dependencies, for the third
-# configuration. Each is added to the module target and switched on by its own
-# macro, so what is proven is the arrangement a user actually wants: this
-# library as modules, built against dependencies that are modules too.
 rc=0
 check classic || rc=1
 check modular "-D${UPPER}_MODULES=ON" || rc=1
